@@ -1,0 +1,42 @@
+[
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/activity_video_call.xml",
+        "source": "com.mimochat.app-main-45:/layout/activity_video_call.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/activity_main.xml",
+        "source": "com.mimochat.app-main-45:/layout/activity_main.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/item_message_user.xml",
+        "source": "com.mimochat.app-main-45:/layout/item_message_user.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/activity_chat.xml",
+        "source": "com.mimochat.app-main-45:/layout/activity_chat.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/item_session.xml",
+        "source": "com.mimochat.app-main-45:/layout/item_session.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/activity_character.xml",
+        "source": "com.mimochat.app-main-45:/layout/activity_character.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/item_message_assistant.xml",
+        "source": "com.mimochat.app-main-45:/layout/item_message_assistant.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/activity_settings.xml",
+        "source": "com.mimochat.app-main-45:/layout/activity_settings.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/activity_voice_call.xml",
+        "source": "com.mimochat.app-main-45:/layout/activity_voice_call.xml"
+    },
+    {
+        "merged": "com.mimochat.app-mergeDebugResources-42:/layout/item_character.xml",
+        "source": "com.mimochat.app-main-45:/layout/item_character.xml"
+    }
+]
