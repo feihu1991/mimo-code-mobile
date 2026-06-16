@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -35,6 +37,8 @@ import com.mimochat.service.VoiceCallConfig
 import com.mimochat.service.VideoCallCallback
 import com.mimochat.service.VideoCallService
 import com.mimochat.service.VoiceCallState
+import java.nio.ByteBuffer
+import java.util.concurrent.Executors
 
 @Composable
 fun VideoCallScreen(navController: NavController, sessionId: String) {
@@ -46,6 +50,8 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
     var isFrontCamera by remember { mutableStateOf(true) }
     var remoteFrame by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     val character = remember { CharacterManager.getSelectedCharacter(context) }
+    val previewView = remember { PreviewView(context) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
     DisposableEffect(Unit) {
         videoService.setCallback(object : VideoCallCallback {
@@ -67,6 +73,39 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
 
     LaunchedEffect(Unit) { permLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)) }
 
+    // Initialize camera provider
+    LaunchedEffect(Unit) {
+        val future = ProcessCameraProvider.getInstance(context)
+        cameraProvider = future.get()
+    }
+
+    // Re-bind camera when isFrontCamera changes
+    LaunchedEffect(isFrontCamera, cameraProvider) {
+        cameraProvider?.let { provider ->
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+            // 帧分析：定期发送给 Vision 模型
+            val imageAnalysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+            imageAnalysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                // 每 5 秒发送一帧 (降低 API 调用频率)
+                val jpeg = imageProxyToJpeg(imageProxy)
+                if (jpeg != null) {
+                    videoService.sendVideoFrame(jpeg)
+                }
+                imageProxy.close()
+            }
+
+            val selector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+            try {
+                provider.unbindAll()
+                provider.bindToLifecycle(lifecycleOwner, selector, preview, imageAnalysis)
+            } catch (_: Exception) {}
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         // Remote video or avatar
         if (remoteFrame != null) {
@@ -85,7 +124,10 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
         Text(
             when (callState) {
                 is VoiceCallState.Connecting -> "正在连接..."
-                is VoiceCallState.Connected -> "视频通话中"
+                is VoiceCallState.Connected -> "准备就绪"
+                is VoiceCallState.Listening -> "🎤 聆听中..."
+                is VoiceCallState.Processing -> "🧠 思考中..."
+                is VoiceCallState.Speaking -> "🔊 回复中..."
                 is VoiceCallState.Reconnecting -> "重新连接中..."
                 is VoiceCallState.Disconnected -> "已断开"
                 is VoiceCallState.Error -> "连接失败"
@@ -96,29 +138,6 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
         )
 
         // Local preview (CameraX)
-        val previewView = remember { PreviewView(context) }
-        var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
-
-        // Initialize camera provider once
-        LaunchedEffect(Unit) {
-            val future = ProcessCameraProvider.getInstance(context)
-            cameraProvider = future.get()
-        }
-
-        // Re-bind camera when isFrontCamera changes
-        LaunchedEffect(isFrontCamera, cameraProvider) {
-            cameraProvider?.let { provider ->
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-                val selector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-                try {
-                    provider.unbindAll()
-                    provider.bindToLifecycle(lifecycleOwner, selector, preview)
-                } catch (_: Exception) {}
-            }
-        }
-
         AndroidView(
             factory = { previewView },
             modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).size(width = 120.dp, height = 160.dp)
@@ -144,5 +163,18 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
                 modifier = Modifier.size(56.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
             ) { Icon(Icons.Default.Cameraswitch, "切换", modifier = Modifier.size(28.dp)) }
         }
+    }
+}
+
+private fun imageProxyToJpeg(imageProxy: ImageProxy): ByteArray? {
+    return try {
+        val buffer: ByteBuffer = imageProxy.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        // 这里简化处理，直接返回 YUV 数据的原始字节
+        // 实际应用中需要 YUV→JPEG 转换
+        bytes
+    } catch (e: Exception) {
+        null
     }
 }

@@ -1,5 +1,4 @@
 package com.mimochat.service
-import com.mimochat.data.*
 
 import android.Manifest
 import android.content.Context
@@ -12,128 +11,210 @@ import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.ActivityCompat
-import com.google.gson.Gson
+import com.mimochat.data.*
 import kotlinx.coroutines.*
-import okhttp3.*
-import okio.ByteString
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 
 class VideoCallService(private val context: Context) {
     companion object {
         private const val TAG = "VideoCallService"
         private const val SAMPLE_RATE = 16000
-        private const val MAX_RECONNECT_ATTEMPTS = 5
-        private const val BASE_RECONNECT_DELAY_MS = 1000L
+        private const val SILENCE_THRESHOLD = 500
+        private const val SILENCE_DURATION_MS = 1500L
+        private const val MIN_SPEECH_DURATION_MS = 500L
     }
 
-    private val gson = Gson()
-    private val client = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).build()
-    private var webSocket: WebSocket? = null
+    private var mimoClient: MiMoClient? = null
     private var audioRecord: AudioRecord? = null
-    private var audioTrack: AudioTrack? = null
-    private var isRecording = false; private var isPlaying = false; private var isMuted = false; private var isSpeakerOn = true
-    private var recordingJob: Job? = null; private var reconnectJob: Job? = null; private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var callback: VideoCallCallback? = null; private var config: VoiceCallConfig? = null
-    private var intentionalDisconnect = false; private var reconnectAttempts = 0
-    var state: VoiceCallState = VoiceCallState.Disconnected; private set
+    private var isRecording = false
+    private var isMuted = false
+    private var recordingJob: Job? = null
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var callback: VideoCallCallback? = null
+    private var config: VoiceCallConfig? = null
+    private var conversationHistory = mutableListOf<ChatMessage>()
+
+    var state: VoiceCallState = VoiceCallState.Disconnected
+        private set
     var onVideoFrame: ((ByteArray) -> Unit)? = null
 
     fun setCallback(callback: VideoCallCallback) { this.callback = callback }
 
-    fun hasPermission(): Boolean = ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    fun hasPermission(): Boolean =
+        ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     fun startCall(config: VoiceCallConfig) {
-        this.config = config; this.intentionalDisconnect = false; this.reconnectAttempts = 0
-        connectWebSocket(config)
-    }
-
-    private fun connectWebSocket(config: VoiceCallConfig) {
+        this.config = config
+        this.conversationHistory.clear()
+        mimoClient = MiMoClient(MiMoConfig(config.baseUrl, config.apiKey))
         updateState(VoiceCallState.Connecting)
-        val wsUrl = config.baseUrl.replace("https://", "wss://").replace("http://", "ws://") + "/video"
-        val request = Request.Builder().url(wsUrl).addHeader("Authorization", "Bearer ${config.apiKey}").build()
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                reconnectAttempts = 0; updateState(VoiceCallState.Connected)
-                webSocket.send(gson.toJson(mapOf("type" to "session.create", "session_id" to config.sessionId, "character_id" to config.character.id, "system_prompt" to config.character.systemPrompt, "mode" to "video")))
-                startAudioCapture(); startAudioPlayback()
-            }
-            override fun onMessage(webSocket: WebSocket, text: String) { handleTextMessage(text) }
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) { if (isPlaying) audioTrack?.write(bytes.toByteArray(), 0, bytes.size) }
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null); handleDisconnection() }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { handleDisconnection(t.message) }
-        })
+
+        scope.launch {
+            delay(500)
+            updateState(VoiceCallState.Connected)
+            delay(300)
+            startListening()
+        }
     }
 
-    private fun handleDisconnection(errorMsg: String? = null) {
-        stopAudioCapture(); stopAudioPlayback(); webSocket = null
-        if (intentionalDisconnect) { config = null; updateState(VoiceCallState.Disconnected); return }
-        val cfg = config
-        if (cfg != null && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            reconnectAttempts++
-            val delayMs = BASE_RECONNECT_DELAY_MS * (1L shl (reconnectAttempts - 1)).coerceAtMost(16)
-            Log.d(TAG, "Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)")
-            updateState(VoiceCallState.Reconnecting)
-            reconnectJob = scope.launch {
-                delay(delayMs)
-                if (!intentionalDisconnect && config != null) connectWebSocket(cfg)
-            }
-        } else { config = null; updateState(VoiceCallState.Error(errorMsg ?: "Connection lost")) }
+    fun stopCall() {
+        recordingJob?.cancel()
+        stopAudioCapture()
+        config = null
+        mimoClient = null
+        conversationHistory.clear()
+        updateState(VoiceCallState.Disconnected)
     }
 
-    fun sendVideoFrame(jpegData: ByteArray) {
-        webSocket?.send(gson.toJson(mapOf("type" to "video.frame", "data" to Base64.encodeToString(jpegData, Base64.NO_WRAP), "format" to "jpeg")))
-    }
-
-    fun stopCall() { intentionalDisconnect = true; reconnectJob?.cancel(); recordingJob?.cancel(); stopAudioCapture(); stopAudioPlayback(); webSocket?.close(1000, "Call ended"); webSocket = null; config = null; updateState(VoiceCallState.Disconnected) }
     fun setMuted(muted: Boolean) { isMuted = muted }
     fun isMuted(): Boolean = isMuted
+
+    // ---- 发送视频帧给 Vision 模型 ----
+
+    fun sendVideoFrame(jpegData: ByteArray) {
+        val client = mimoClient ?: return
+        val cfg = config ?: return
+
+        scope.launch {
+            try {
+                val base64 = Base64.encodeToString(jpegData, Base64.NO_WRAP)
+                val response = client.describeImage(
+                    imageBase64 = base64,
+                    mimeType = "image/jpeg",
+                    prompt = "简要描述摄像头画面中的内容，一句话概括"
+                )
+                Log.d(TAG, "Vision frame: $response")
+            } catch (e: Exception) {
+                Log.e(TAG, "Vision frame error", e)
+            }
+        }
+    }
+
+    // ---- 语音对话流水线 (同 VoiceCallService) ----
+
+    private fun startListening() {
+        if (state is VoiceCallState.Disconnected || state is VoiceCallState.Error) return
+        updateState(VoiceCallState.Listening)
+        startAudioCapture()
+    }
 
     private fun startAudioCapture() {
         if (!hasPermission()) return
         val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
         if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) return
-        audioRecord?.startRecording(); isRecording = true
+        audioRecord?.startRecording()
+        isRecording = true
+
         recordingJob = scope.launch {
-            val buffer = ByteArray(bufferSize); val stream = ByteArrayOutputStream()
+            val buffer = ByteArray(bufferSize)
+            val speechBuffer = ByteArrayOutputStream()
+            var lastSpeechTime = System.currentTimeMillis()
+            var speechStartTime = 0L
+
             while (isActive && isRecording) {
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                 if (read > 0 && !isMuted) {
-                    stream.write(buffer, 0, read)
-                    if (stream.size() >= SAMPLE_RATE * 2 * 100 / 1000) {
-                        webSocket?.send(gson.toJson(mapOf("type" to "audio.data", "data" to Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP), "format" to "pcm_s16le", "sample_rate" to SAMPLE_RATE, "channels" to 1)))
-                        stream.reset()
+                    val level = calculateAudioLevel(buffer, read)
+                    if (level * 32768 > SILENCE_THRESHOLD) {
+                        if (speechStartTime == 0L) speechStartTime = System.currentTimeMillis()
+                        lastSpeechTime = System.currentTimeMillis()
+                        speechBuffer.write(buffer, 0, read)
+                    } else if (speechStartTime > 0) {
+                        speechBuffer.write(buffer, 0, read)
+                        if (System.currentTimeMillis() - lastSpeechTime >= SILENCE_DURATION_MS
+                            && lastSpeechTime - speechStartTime >= MIN_SPEECH_DURATION_MS) {
+                            val audioData = speechBuffer.toByteArray()
+                            speechBuffer.reset()
+                            speechStartTime = 0L
+                            stopAudioCapture()
+                            processAudio(audioData)
+                            return@launch
+                        }
                     }
-                } else if (read > 0) stream.reset()
+                }
             }
         }
     }
 
-    private fun stopAudioCapture() { isRecording = false; recordingJob?.cancel(); try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}; audioRecord = null }
-
-    private fun startAudioPlayback() {
-        val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        audioTrack = AudioTrack.Builder().setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(SAMPLE_RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-            .setBufferSizeInBytes(bufferSize).setTransferMode(AudioTrack.MODE_STREAM).build()
-        audioTrack?.play(); isPlaying = true
+    private fun stopAudioCapture() {
+        isRecording = false
+        recordingJob?.cancel()
+        try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
+        audioRecord = null
     }
 
-    private fun stopAudioPlayback() { isPlaying = false; try { audioTrack?.stop(); audioTrack?.release() } catch (_: Exception) {}; audioTrack = null }
+    private suspend fun processAudio(audioData: ByteArray) {
+        val cfg = config ?: return
+        val client = mimoClient ?: return
+        updateState(VoiceCallState.Processing)
 
-    private fun handleTextMessage(message: String) {
         try {
-            val json = gson.fromJson(message, Map::class.java)
-            when (json["type"]) {
-                "session.created" -> Log.d(TAG, "Session created")
-                "error" -> updateState(VoiceCallState.Error(json["message"] as? String ?: "Unknown error"))
-                "video.frame" -> (json["data"] as? String)?.let { data -> val bytes = Base64.decode(data, Base64.DEFAULT); scope.launch(Dispatchers.Main) { onVideoFrame?.invoke(bytes) } }
-            }
-        } catch (e: Exception) { Log.e(TAG, "Parse error", e) }
+            val audioBase64 = Base64.encodeToString(audioData, Base64.NO_WRAP)
+            val userText = client.transcribe(audioBase64 = audioBase64, mimeType = "audio/m4a", language = "zh")
+            if (userText.isBlank()) { startListening(); return }
+
+            conversationHistory.add(ChatMessage(role = "user", content = userText))
+            val response = client.sendMessage(
+                sessionId = cfg.sessionId,
+                history = conversationHistory.toList(),
+                userText = userText,
+                systemPrompt = cfg.character.systemPrompt
+            )
+            val assistantText = response.choices?.firstOrNull()?.message?.content?.toString() ?: "抱歉，我没有理解"
+            conversationHistory.add(ChatMessage(role = "assistant", content = assistantText))
+
+            updateState(VoiceCallState.Speaking)
+            val ttsAudio = client.synthesizeSpeech(text = assistantText)
+            playAudioAndResume(ttsAudio)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice pipeline error", e)
+            delay(1000)
+            startListening()
+        }
     }
 
-    private fun updateState(newState: VoiceCallState) { state = newState; scope.launch(Dispatchers.Main) { callback?.onStateChanged(newState) } }
+    private suspend fun playAudioAndResume(audioData: ByteArray) {
+        val tempFile = File(context.cacheDir, "video_tts_${System.currentTimeMillis()}.mp3")
+        withContext(Dispatchers.IO) { FileOutputStream(tempFile).use { it.write(audioData) } }
+
+        try {
+            val mediaPlayer = android.media.MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .build()
+                )
+                setDataSource(tempFile.absolutePath)
+                setOnCompletionListener { it.release(); tempFile.delete(); scope.launch { delay(300); startListening() } }
+                setOnErrorListener { mp, _, _ -> mp.release(); tempFile.delete(); scope.launch { delay(300); startListening() }; true }
+                prepare()
+                start()
+            }
+        } catch (e: Exception) { tempFile.delete(); startListening() }
+    }
+
+    private fun calculateAudioLevel(buffer: ByteArray, length: Int): Float {
+        var sum = 0L
+        for (i in 0 until length step 2) {
+            if (i + 1 < length) {
+                val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+                sum += kotlin.math.abs(sample.toLong())
+            }
+        }
+        return ((sum / (length / 2)) / 32768.0f).coerceIn(0f, 1f)
+    }
+
+    private fun updateState(newState: VoiceCallState) {
+        state = newState
+        scope.launch(Dispatchers.Main) { callback?.onStateChanged(newState) }
+    }
+
     fun release() { stopCall(); scope.cancel() }
 }
 

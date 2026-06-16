@@ -78,12 +78,20 @@ fun VoiceCallScreen(navController: NavController, sessionId: String) {
             when (callState) {
                 is VoiceCallState.Disconnected -> "已断开"
                 is VoiceCallState.Connecting -> "正在连接..."
-                is VoiceCallState.Connected -> "通话中"
+                is VoiceCallState.Connected -> "准备就绪"
+                is VoiceCallState.Listening -> "🎤 正在聆听..."
+                is VoiceCallState.Processing -> "🧠 思考中..."
+                is VoiceCallState.Speaking -> "🔊 正在回复..."
                 is VoiceCallState.Reconnecting -> "重新连接中..."
                 is VoiceCallState.Error -> "连接失败"
             },
             style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = when (callState) {
+                is VoiceCallState.Listening -> MaterialTheme.colorScheme.primary
+                is VoiceCallState.Processing -> MaterialTheme.colorScheme.tertiary
+                is VoiceCallState.Speaking -> MaterialTheme.colorScheme.secondary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
         )
         Spacer(Modifier.height(64.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {

@@ -1,5 +1,4 @@
 package com.mimochat.service
-import com.mimochat.data.*
 
 import android.Manifest
 import android.content.Context
@@ -13,11 +12,14 @@ import android.util.Base64
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
+import com.mimochat.data.Character
+import com.mimochat.data.ChatMessage
+import com.mimochat.data.MiMoClient
 import kotlinx.coroutines.*
-import okhttp3.*
-import okio.ByteString
-import okio.ByteString.Companion.toByteString
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 
 data class VoiceCallConfig(
@@ -31,6 +33,9 @@ sealed class VoiceCallState {
     object Disconnected : VoiceCallState()
     object Connecting : VoiceCallState()
     object Connected : VoiceCallState()
+    object Listening : VoiceCallState()      // 正在听用户说话
+    object Processing : VoiceCallState()     // 正在处理 (ASR→Chat→TTS)
+    object Speaking : VoiceCallState()       // 正在播放 AI 回复
     object Reconnecting : VoiceCallState()
     data class Error(val message: String) : VoiceCallState()
 }
@@ -48,34 +53,29 @@ class VoiceCallService(private val context: Context) {
         private const val CHANNEL_CONFIG_IN = AudioFormat.CHANNEL_IN_MONO
         private const val CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val AUDIO_SEND_INTERVAL_MS = 100L
-        private const val MAX_RECONNECT_ATTEMPTS = 5
-        private const val BASE_RECONNECT_DELAY_MS = 1000L
+        // 静音检测：连续 N 毫秒静音则认为说完一句话
+        private const val SILENCE_THRESHOLD = 500       // 音量阈值
+        private const val SILENCE_DURATION_MS = 1500L   // 静音持续时间
+        private const val MIN_SPEECH_DURATION_MS = 500L // 最短语音时长
     }
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
-        .build()
+    private var mimoClient: MiMoClient? = null
 
-    private var webSocket: WebSocket? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-
     private var isRecording = false
     private var isPlaying = false
     private var isMuted = false
     private var isSpeakerOn = true
 
     private var recordingJob: Job? = null
-    private var reconnectJob: Job? = null
+    private var playbackJob: Job? = null
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var callback: VoiceCallCallback? = null
     private var config: VoiceCallConfig? = null
-    private var intentionalDisconnect = false
-    private var reconnectAttempts = 0
+    private var conversationHistory = mutableListOf<ChatMessage>()
 
     var state: VoiceCallState = VoiceCallState.Disconnected
         private set
@@ -86,110 +86,33 @@ class VoiceCallService(private val context: Context) {
 
     fun hasPermission(): Boolean {
         return ActivityCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO
+            context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
     }
 
     fun startCall(config: VoiceCallConfig) {
         this.config = config
-        this.intentionalDisconnect = false
-        this.reconnectAttempts = 0
-        connectWebSocket(config)
-    }
+        this.conversationHistory.clear()
+        mimoClient = MiMoClient(com.mimochat.data.MiMoConfig(config.baseUrl, config.apiKey))
+        updateState(VoiceCallState.Connecting)
 
-    private fun connectWebSocket(config: VoiceCallConfig) {
-        val wsUrl = config.baseUrl.replace("https://", "wss://")
-            .replace("http://", "ws://") + "/voice"
-
-        val request = Request.Builder()
-            .url(wsUrl)
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .build()
-
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket connected")
-                reconnectAttempts = 0
-                updateState(VoiceCallState.Connected)
-
-                val sessionMsg = gson.toJson(mapOf(
-                    "type" to "session.create",
-                    "session_id" to config.sessionId,
-                    "character_id" to config.character.id,
-                    "system_prompt" to config.character.systemPrompt
-                ))
-                webSocket.send(sessionMsg)
-
-                startAudioCapture()
-                startAudioPlayback()
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.d(TAG, "Received text: $text")
-                handleTextMessage(text)
-            }
-
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                handleAudioData(bytes.toByteArray())
-            }
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WebSocket closing: $code $reason")
-                webSocket.close(1000, null)
-                handleDisconnection()
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket failure", t)
-                handleDisconnection(t.message)
-            }
-        })
-    }
-
-    private fun handleDisconnection(errorMsg: String? = null) {
-        stopAudioCapture()
-        stopAudioPlayback()
-        webSocket = null
-
-        if (intentionalDisconnect) {
-            config = null
-            updateState(VoiceCallState.Disconnected)
-            return
-        }
-
-        val cfg = config
-        if (cfg != null && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            reconnectAttempts++
-            val delayMs = BASE_RECONNECT_DELAY_MS * (1L shl (reconnectAttempts - 1)).coerceAtMost(16)
-            Log.d(TAG, "Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)")
-            updateState(VoiceCallState.Reconnecting)
-            reconnectJob = scope.launch {
-                delay(delayMs)
-                if (!intentionalDisconnect && config != null) {
-                    connectWebSocket(cfg)
-                }
-            }
-        } else {
-            config = null
-            updateState(VoiceCallState.Error(errorMsg ?: "Connection lost"))
+        // 模拟连接建立，直接进入 Connected 状态
+        scope.launch {
+            delay(500)
+            updateState(VoiceCallState.Connected)
+            delay(300)
+            startListening()
         }
     }
 
     fun stopCall() {
-        intentionalDisconnect = true
-        reconnectJob?.cancel()
-        reconnectJob = null
         recordingJob?.cancel()
-        recordingJob = null
-
+        playbackJob?.cancel()
         stopAudioCapture()
         stopAudioPlayback()
-
-        webSocket?.close(1000, "Call ended")
-        webSocket = null
-
         config = null
+        mimoClient = null
+        conversationHistory.clear()
         updateState(VoiceCallState.Disconnected)
     }
 
@@ -202,15 +125,21 @@ class VoiceCallService(private val context: Context) {
     fun setSpeaker(enabled: Boolean) {
         if (isSpeakerOn == enabled) return
         isSpeakerOn = enabled
-        // AudioTrack stream type cannot be changed after creation,
-        // so we must recreate it to switch between speaker and earpiece
         if (isPlaying) {
             stopAudioPlayback()
-            startAudioPlayback()
+            // Playback will restart on next TTS
         }
     }
 
     fun isSpeakerEnabled(): Boolean = isSpeakerOn
+
+    // ---- 核心语音对话流水线 ----
+
+    private fun startListening() {
+        if (state is VoiceCallState.Disconnected || state is VoiceCallState.Error) return
+        updateState(VoiceCallState.Listening)
+        startAudioCapture()
+    }
 
     private fun startAudioCapture() {
         if (!hasPermission()) {
@@ -221,10 +150,7 @@ class VoiceCallService(private val context: Context) {
         val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_IN, AUDIO_FORMAT)
         audioRecord = AudioRecord(
             MediaRecorder.AudioSource.MIC,
-            SAMPLE_RATE,
-            CHANNEL_CONFIG_IN,
-            AUDIO_FORMAT,
-            bufferSize
+            SAMPLE_RATE, CHANNEL_CONFIG_IN, AUDIO_FORMAT, bufferSize
         )
 
         if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -237,34 +163,42 @@ class VoiceCallService(private val context: Context) {
 
         recordingJob = scope.launch {
             val buffer = ByteArray(bufferSize)
-            val audioStream = ByteArrayOutputStream()
+            val speechBuffer = ByteArrayOutputStream()
+            var lastSpeechTime = System.currentTimeMillis()
+            var speechStartTime = 0L
 
             while (isActive && isRecording) {
                 val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                 if (bytesRead > 0 && !isMuted) {
-                    audioStream.write(buffer, 0, bytesRead)
+                    val level = calculateAudioLevel(buffer, bytesRead)
+                    withContext(Dispatchers.Main) {
+                        callback?.onAudioLevelChanged(level)
+                    }
 
-                    if (audioStream.size() >= SAMPLE_RATE * 2 * AUDIO_SEND_INTERVAL_MS / 1000) {
-                        val audioData = audioStream.toByteArray()
-                        audioStream.reset()
+                    if (level * 32768 > SILENCE_THRESHOLD) {
+                        // 有声音
+                        if (speechStartTime == 0L) {
+                            speechStartTime = System.currentTimeMillis()
+                        }
+                        lastSpeechTime = System.currentTimeMillis()
+                        speechBuffer.write(buffer, 0, bytesRead)
+                    } else if (speechStartTime > 0) {
+                        // 静音中，但之前有声音
+                        speechBuffer.write(buffer, 0, bytesRead)
+                        val silenceDuration = System.currentTimeMillis() - lastSpeechTime
+                        val speechDuration = lastSpeechTime - speechStartTime
 
-                        val base64Audio = Base64.encodeToString(audioData, Base64.NO_WRAP)
-                        val message = gson.toJson(mapOf(
-                            "type" to "audio.data",
-                            "data" to base64Audio,
-                            "format" to "pcm_s16le",
-                            "sample_rate" to SAMPLE_RATE,
-                            "channels" to 1
-                        ))
-                        webSocket?.send(message)
+                        if (silenceDuration >= SILENCE_DURATION_MS && speechDuration >= MIN_SPEECH_DURATION_MS) {
+                            // 一句话说完了
+                            val audioData = speechBuffer.toByteArray()
+                            speechBuffer.reset()
+                            speechStartTime = 0L
 
-                        val level = calculateAudioLevel(audioData)
-                        withContext(Dispatchers.Main) {
-                            callback?.onAudioLevelChanged(level)
+                            stopAudioCapture()
+                            processAudio(audioData)
+                            return@launch
                         }
                     }
-                } else if (bytesRead > 0) {
-                    audioStream.reset()
                 }
             }
         }
@@ -282,35 +216,121 @@ class VoiceCallService(private val context: Context) {
         audioRecord = null
     }
 
-    private fun startAudioPlayback() {
-        val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+    private suspend fun processAudio(audioData: ByteArray) {
+        val cfg = config ?: return
+        val client = mimoClient ?: return
 
-        val streamType = if (isSpeakerOn) {
-            android.media.AudioManager.STREAM_MUSIC
-        } else {
-            android.media.AudioManager.STREAM_VOICE_CALL
+        updateState(VoiceCallState.Processing)
+
+        try {
+            // Step 1: ASR - 语音转文字
+            val audioBase64 = Base64.encodeToString(audioData, Base64.NO_WRAP)
+            val userText = client.transcribe(audioBase64 = audioBase64, mimeType = "audio/m4a", language = "zh")
+
+            if (userText.isBlank()) {
+                Log.d(TAG, "ASR returned empty, resuming listen")
+                startListening()
+                return
+            }
+
+            Log.d(TAG, "ASR result: $userText")
+
+            // Step 2: Chat - 发送文字获取回复
+            conversationHistory.add(ChatMessage(role = "user", content = userText))
+            val response = client.sendMessage(
+                sessionId = cfg.sessionId,
+                history = conversationHistory.toList(),
+                userText = userText,
+                systemPrompt = cfg.character.systemPrompt
+            )
+            val assistantText = response.choices?.firstOrNull()?.message?.content?.toString() ?: "抱歉，我没有理解"
+            conversationHistory.add(ChatMessage(role = "assistant", content = assistantText))
+
+            Log.d(TAG, "Chat response: ${assistantText.take(100)}...")
+
+            // Step 3: TTS - 文字转语音并播放
+            updateState(VoiceCallState.Speaking)
+            val audioBytes = client.synthesizeSpeech(text = assistantText)
+            playAudio(audioBytes)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice pipeline error", e)
+            // 出错后继续监听
+            delay(1000)
+            startListening()
+        }
+    }
+
+    private suspend fun playAudio(audioData: ByteArray) {
+        val tempFile = File(context.cacheDir, "voice_${System.currentTimeMillis()}.mp3")
+        withContext(Dispatchers.IO) {
+            FileOutputStream(tempFile).use { it.write(audioData) }
         }
 
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(if (isSpeakerOn) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AUDIO_FORMAT)
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(CHANNEL_CONFIG_OUT)
-                    .build()
-            )
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
+        try {
+            stopAudioPlayback()
+            val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+            audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(if (isSpeakerOn) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AUDIO_FORMAT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(CHANNEL_CONFIG_OUT)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
 
-        audioTrack?.play()
-        isPlaying = true
+            audioTrack?.play()
+            isPlaying = true
+
+            // 读取并播放 (这里简化处理，实际应该解码 mp3)
+            // 对于 mp3 格式，使用 MediaPlayer 更合适
+            stopAudioPlayback()
+            isPlaying = false
+
+            // 使用 MediaPlayer 播放 mp3
+            val mediaPlayer = android.media.MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .setUsage(if (isSpeakerOn) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .build()
+                )
+                setDataSource(tempFile.absolutePath)
+                setOnCompletionListener {
+                    it.release()
+                    tempFile.delete()
+                    // 播放完后继续监听
+                    scope.launch {
+                        delay(300)
+                        startListening()
+                    }
+                }
+                setOnErrorListener { mp, _, _ ->
+                    mp.release()
+                    tempFile.delete()
+                    scope.launch {
+                        delay(300)
+                        startListening()
+                    }
+                    true
+                }
+                prepare()
+                start()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Audio playback error", e)
+            tempFile.delete()
+            startListening()
+        }
     }
 
     private fun stopAudioPlayback() {
@@ -324,45 +344,15 @@ class VoiceCallService(private val context: Context) {
         audioTrack = null
     }
 
-    private fun handleAudioData(audioData: ByteArray) {
-        if (isPlaying) {
-            audioTrack?.write(audioData, 0, audioData.size)
-        }
-    }
-
-    private fun handleTextMessage(message: String) {
-        try {
-            val json = gson.fromJson(message, Map::class.java)
-            when (json["type"]) {
-                "session.created" -> {
-                    Log.d(TAG, "Session created: ${json["session_id"]}")
-                }
-                "error" -> {
-                    val errorMsg = json["message"] as? String ?: "Unknown error"
-                    Log.e(TAG, "Server error: $errorMsg")
-                    updateState(VoiceCallState.Error(errorMsg))
-                }
-                "audio.level" -> {
-                    val level = (json["level"] as? Number)?.toFloat() ?: 0f
-                    scope.launch(Dispatchers.Main) {
-                        callback?.onAudioLevelChanged(level)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error parsing message: $message", e)
-        }
-    }
-
-    private fun calculateAudioLevel(audioData: ByteArray): Float {
+    private fun calculateAudioLevel(buffer: ByteArray, length: Int): Float {
         var sum = 0L
-        for (i in audioData.indices step 2) {
-            if (i + 1 < audioData.size) {
-                val sample = (audioData[i].toInt() and 0xFF) or (audioData[i + 1].toInt() shl 8)
+        for (i in 0 until length step 2) {
+            if (i + 1 < length) {
+                val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
                 sum += kotlin.math.abs(sample.toLong())
             }
         }
-        val average = sum / (audioData.size / 2)
+        val average = sum / (length / 2)
         return (average / 32768.0f).coerceIn(0f, 1f)
     }
 

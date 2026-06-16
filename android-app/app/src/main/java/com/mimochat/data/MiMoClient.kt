@@ -1,56 +1,98 @@
 package com.mimochat.data
 
+import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import java.io.File
-import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+
+// --- MiMo API 数据模型 (OpenAI 兼容格式) ---
 
 data class MiMoConfig(
     val baseUrl: String,
     val apiKey: String
 )
 
-data class CreateSessionResponse(
+data class ChatMessage(
+    val role: String,       // "system", "user", "assistant"
+    val content: Any        // String 或 List<ContentPart> (多模态)
+)
+
+data class ContentPart(
+    val type: String,                    // "text" 或 "image_url"
+    val text: String? = null,
+    @SerializedName("image_url")
+    val imageUrl: ImageUrl? = null
+)
+
+data class ImageUrl(
+    val url: String   // "data:image/jpeg;base64,..."
+)
+
+data class ChatCompletionRequest(
+    val model: String,
+    val messages: List<ChatMessage>,
+    val stream: Boolean = false,
+    val temperature: Double? = null,
+    @SerializedName("max_tokens")
+    val maxTokens: Int? = null
+)
+
+data class ChatCompletionResponse(
+    val id: String?,
+    val choices: List<Choice>?,
+    val usage: Usage?
+)
+
+data class Choice(
+    val index: Int,
+    val message: ChatMessage,
+    @SerializedName("finish_reason")
+    val finishReason: String?
+)
+
+data class Usage(
+    @SerializedName("prompt_tokens")
+    val promptTokens: Int,
+    @SerializedName("completion_tokens")
+    val completionTokens: Int,
+    @SerializedName("total_tokens")
+    val totalTokens: Int
+)
+
+// --- 本地消息历史 (用于 UI 展示) ---
+
+data class Message(
     val id: String,
-    val title: String,
+    val sessionId: String,
+    val role: String,       // "user" 或 "assistant"
+    val content: String,
     val createdAt: Long,
-    val updatedAt: Long
+    val parts: List<Part>? = null
 )
 
-data class SendMessageRequest(
-    val parts: List<PartInput>,
-    val system: String? = null
-)
-
-data class PartInput(
-    val type: String,
+data class Part(
+    val type: String,       // "text", "image"
     val content: String,
     val mimeType: String? = null
 )
 
-data class TranscriptionResponse(
-    val text: String
-)
+// --- MiMo API 客户端 ---
 
 class MiMoClient(private val config: MiMoConfig) {
 
-    private fun buildUrl(vararg pathSegments: String): String {
-        val base = config.baseUrl.trimEnd('/')
-        val urlBuilder = base.toHttpUrl().newBuilder()
-        pathSegments.forEach { segment ->
-            urlBuilder.addPathSegment(segment)
-        }
-        return urlBuilder.build().toString()
+    companion object {
+        private const val TAG = "MiMoClient"
+        const val MODEL_CHAT = "mimo-v2.5-pro"
+        const val MODEL_VISION = "mimo-v2.5"
+        const val MODEL_TTS = "mimo-v2.5-tts"
+        const val MODEL_ASR = "mimo-v2.5-asr"
     }
 
     private val client = OkHttpClient.Builder()
@@ -61,100 +103,186 @@ class MiMoClient(private val config: MiMoConfig) {
 
     private val gson = Gson()
 
-    private fun Request.executeAndParse(): okhttp3.Response {
-        val response = client.newCall(this).execute()
-        if (!response.isSuccessful) {
-            response.close()
-            throw Exception("API error: ${response.code}")
-        }
-        return response
+    // ---- 核心请求方法 ----
+
+    private fun buildChatUrl(): String {
+        return config.baseUrl.trimEnd('/') + "/chat/completions"
     }
 
-    private inline fun <reified T> Request.executeAndParseJson(): T {
-        val response = executeAndParse()
+    private fun createRequest(jsonBody: String): Request {
+        return Request.Builder()
+            .url(buildChatUrl())
+            .post(jsonBody.toRequestBody("application/json".toMediaType()))
+            .addHeader("Authorization", "Bearer ${config.apiKey}")
+            .addHeader("Content-Type", "application/json")
+            .build()
+    }
+
+    private fun <T> executeRequest(request: Request, clazz: Class<T>): T {
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Unknown error"
+            response.close()
+            Log.e(TAG, "API error ${response.code}: $errorBody")
+            throw Exception("API error: ${response.code} - $errorBody")
+        }
         return response.use { resp ->
             val body = resp.body?.string() ?: throw Exception("Empty response")
-            gson.fromJson(body, T::class.java)
+            gson.fromJson(body, clazz)
         }
     }
 
-    suspend fun createSession(title: String? = null): CreateSessionResponse = withContext(Dispatchers.IO) {
-        val body = if (title != null) gson.toJson(mapOf("title" to title)) else "{}"
-        Request.Builder()
-            .url("${config.baseUrl}/session")
-            .post(body.toRequestBody("application/json".toMediaType()))
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .addHeader("Content-Type", "application/json")
-            .build()
-            .executeAndParseJson()
+    // ---- 聊天补全 (纯文本) ----
+
+    suspend fun chatCompletion(
+        messages: List<ChatMessage>,
+        model: String = MODEL_CHAT,
+        temperature: Double? = null,
+        maxTokens: Int? = null
+    ): ChatCompletionResponse = withContext(Dispatchers.IO) {
+        val request = ChatCompletionRequest(
+            model = model,
+            messages = messages,
+            stream = false,
+            temperature = temperature,
+            maxTokens = maxTokens
+        )
+        val json = gson.toJson(request)
+        Log.d(TAG, "Chat request: model=$model, messages=${messages.size}")
+        executeRequest(createRequest(json), ChatCompletionResponse::class.java)
     }
 
-    suspend fun getMessages(sessionId: String): List<Message> = withContext(Dispatchers.IO) {
-        val response = Request.Builder()
-            .url(buildUrl("session", sessionId, "messages"))
-            .get()
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .build()
-            .executeAndParse()
+    // ---- 发送文本消息 (带角色 system prompt) ----
+
+    suspend fun sendMessage(
+        sessionId: String,
+        history: List<ChatMessage>,
+        userText: String,
+        systemPrompt: String? = null
+    ): ChatCompletionResponse {
+        val messages = mutableListOf<ChatMessage>()
+        if (systemPrompt != null) {
+            messages.add(ChatMessage(role = "system", content = systemPrompt))
+        }
+        messages.addAll(history)
+        messages.add(ChatMessage(role = "user", content = userText))
+        return chatCompletion(messages)
+    }
+
+    // ---- 发送图片 + 文本 (多模态) ----
+
+    suspend fun sendImage(
+        sessionId: String,
+        imageBase64: String,
+        mimeType: String,
+        text: String?,
+        history: List<ChatMessage>,
+        systemPrompt: String? = null
+    ): ChatCompletionResponse {
+        val dataUri = "data:$mimeType;base64,$imageBase64"
+        val contentParts = mutableListOf<ContentPart>()
+        if (text != null) {
+            contentParts.add(ContentPart(type = "text", text = text))
+        } else {
+            contentParts.add(ContentPart(type = "text", text = "请描述这张图片"))
+        }
+        contentParts.add(ContentPart(
+            type = "image_url",
+            imageUrl = ImageUrl(url = dataUri)
+        ))
+
+        val messages = mutableListOf<ChatMessage>()
+        if (systemPrompt != null) {
+            messages.add(ChatMessage(role = "system", content = systemPrompt))
+        }
+        messages.addAll(history)
+        messages.add(ChatMessage(role = "user", content = contentParts))
+
+        return chatCompletion(messages, model = MODEL_VISION)
+    }
+
+    // ---- TTS 语音合成 ----
+
+    suspend fun synthesizeSpeech(
+        text: String,
+        voice: String = "mimo_default",
+        style: String? = null
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val ttsContent = if (style != null) {
+            "<style>$style</style>$text"
+        } else {
+            text
+        }
+        val messages = listOf(
+            ChatMessage(role = "user", content = "请合成以下内容"),
+            ChatMessage(role = "assistant", content = ttsContent)
+        )
+        val request = ChatCompletionRequest(
+            model = MODEL_TTS,
+            messages = messages,
+            stream = false
+        )
+        val json = gson.toJson(request)
+        Log.d(TAG, "TTS request: text=${text.take(50)}...")
+
+        val response = client.newCall(createRequest(json)).execute()
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Unknown error"
+            response.close()
+            throw Exception("TTS API error: ${response.code} - $errorBody")
+        }
         response.use { resp ->
-            val body = resp.body?.string() ?: throw Exception("Empty response")
-            gson.fromJson(body, object : TypeToken<List<Message>>() {}.type)
+            resp.body?.bytes() ?: throw Exception("Empty TTS response")
         }
     }
 
-    suspend fun sendMessage(sessionId: String, content: String, system: String? = null): Message = withContext(Dispatchers.IO) {
-        val requestBody = SendMessageRequest(parts = listOf(PartInput(type = "text", content = content)), system = system)
-        Request.Builder()
-            .url(buildUrl("session", sessionId, "prompt"))
-            .post(gson.toJson(requestBody).toRequestBody("application/json".toMediaType()))
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .addHeader("Content-Type", "application/json")
-            .build()
-            .executeAndParseJson()
+    // ---- ASR 语音识别 ----
+
+    suspend fun transcribe(
+        audioBase64: String,
+        mimeType: String = "audio/m4a",
+        language: String = "zh"
+    ): String = withContext(Dispatchers.IO) {
+        val dataUri = "data:$mimeType;base64,$audioBase64"
+        val contentParts = listOf(
+            ContentPart(
+                type = "image_url",
+                imageUrl = ImageUrl(url = dataUri)
+            )
+        )
+        val messages = listOf(
+            ChatMessage(role = "user", content = contentParts)
+        )
+        val request = ChatCompletionRequest(
+            model = MODEL_ASR,
+            messages = messages,
+            stream = false
+        )
+        val json = gson.toJson(request)
+        Log.d(TAG, "ASR request")
+
+        val response = executeRequest(createRequest(json), ChatCompletionResponse::class.java)
+        response.choices?.firstOrNull()?.message?.content?.toString()
+            ?: throw Exception("ASR returned empty result")
     }
 
-    suspend fun sendImage(sessionId: String, imageBase64: String, mimeType: String, text: String? = null): Message = withContext(Dispatchers.IO) {
-        val parts = mutableListOf<PartInput>()
-        if (text != null) parts.add(PartInput(type = "text", content = text))
-        parts.add(PartInput(type = "file", content = imageBase64, mimeType = mimeType))
-        Request.Builder()
-            .url(buildUrl("session", sessionId, "prompt"))
-            .post(gson.toJson(SendMessageRequest(parts = parts)).toRequestBody("application/json".toMediaType()))
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .addHeader("Content-Type", "application/json")
-            .build()
-            .executeAndParseJson()
-    }
+    // ---- 图片理解 (Vision) ----
 
-    suspend fun transcribe(audioFile: File, language: String = "zh"): String = withContext(Dispatchers.IO) {
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("file", audioFile.name, audioFile.asRequestBody("audio/m4a".toMediaType()))
-            .addFormDataPart("model", "whisper-1")
-            .addFormDataPart("language", language)
-            .addFormDataPart("response_format", "json")
-            .build()
-        val response = Request.Builder()
-            .url("${config.baseUrl}/audio/transcriptions")
-            .post(requestBody)
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .build()
-            .executeAndParse()
-        response.use { resp ->
-            val body = resp.body?.string() ?: throw Exception("Empty response")
-            gson.fromJson(body, TranscriptionResponse::class.java).text
-        }
-    }
-
-    suspend fun synthesizeSpeech(text: String, voice: String = "alloy", model: String = "tts-1", speed: Float = 1.0f): ByteArray = withContext(Dispatchers.IO) {
-        val requestBody = gson.toJson(mapOf("model" to model, "input" to text, "voice" to voice, "speed" to speed))
-        val response = Request.Builder()
-            .url("${config.baseUrl}/audio/speech")
-            .post(requestBody.toRequestBody("application/json".toMediaType()))
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .addHeader("Content-Type", "application/json")
-            .build()
-            .executeAndParse()
-        response.use { resp -> resp.body?.bytes() ?: throw Exception("Empty response body") }
+    suspend fun describeImage(
+        imageBase64: String,
+        mimeType: String = "image/jpeg",
+        prompt: String = "请描述这张图片"
+    ): String = withContext(Dispatchers.IO) {
+        val dataUri = "data:$mimeType;base64,$imageBase64"
+        val contentParts = listOf(
+            ContentPart(type = "text", text = prompt),
+            ContentPart(type = "image_url", imageUrl = ImageUrl(url = dataUri))
+        )
+        val messages = listOf(
+            ChatMessage(role = "user", content = contentParts)
+        )
+        val response = chatCompletion(messages, model = MODEL_VISION)
+        response.choices?.firstOrNull()?.message?.content?.toString()
+            ?: throw Exception("Vision returned empty result")
     }
 }

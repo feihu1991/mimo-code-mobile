@@ -8,7 +8,6 @@ import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,17 +23,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
-import com.mimochat.data.CharacterManager
-import com.mimochat.data.Message
-import com.mimochat.data.MiMoClient
-import com.mimochat.data.MiMoConfigManager
+import com.mimochat.data.*
 import com.mimochat.ui.navigation.Routes
 import com.mimochat.service.ASRService
 import com.mimochat.service.TTSService
@@ -55,18 +48,12 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
     val ttsService = remember { TTSService(context) }
 
     var messages by remember { mutableStateOf(listOf<Message>()) }
+    var chatHistory by remember { mutableStateOf(listOf<ChatMessage>()) }
     var inputText by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isRecording by remember { mutableStateOf(false) }
     var autoTts by remember { mutableStateOf(false) }
     val character = remember { CharacterManager.getSelectedCharacter(context) }
-
-    // Load messages
-    LaunchedEffect(sessionId) {
-        mimoClient?.let { client ->
-            try { messages = client.getMessages(sessionId) } catch (_: Exception) {}
-        }
-    }
 
     // Auto scroll
     LaunchedEffect(messages.size) {
@@ -79,7 +66,7 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
             scope.launch {
                 isLoading = true
                 try {
-                    // Decode bounds first to calculate sample size (prevents OOM on large images)
+                    // 使用 inSampleSize 防止 OOM
                     val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     context.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s, null, opts) }
                     val maxDim = maxOf(opts.outWidth, opts.outHeight)
@@ -92,18 +79,36 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
                     } ?: return@launch
                     val ratio = 1024f / maxOf(bitmap.width, bitmap.height)
                     val scaled = if (ratio < 1) android.graphics.Bitmap.createScaledBitmap(bitmap, (bitmap.width * ratio).toInt(), (bitmap.height * ratio).toInt(), true) else bitmap
-                    val out = ByteArrayOutputStream(); scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                    val out = ByteArrayOutputStream()
+                    scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
                     val base64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
                     val mimeType = context.contentResolver.getType(it) ?: "image/jpeg"
                     val text = inputText.ifBlank { null }
                     inputText = ""
+
                     val client = mimoClient ?: run {
                         Toast.makeText(context, "请先配置 API", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
-                    val response = client.sendImage(sessionId, base64, mimeType, text)
-                    messages = messages + Message("msg_${System.currentTimeMillis()}", sessionId, "user", text ?: "[图片]", System.currentTimeMillis()) + response
-                    if (autoTts) ttsService.speak(response.content, client)
+
+                    val response = client.sendImage(
+                        sessionId = sessionId,
+                        imageBase64 = base64,
+                        mimeType = mimeType,
+                        text = text,
+                        history = chatHistory,
+                        systemPrompt = character.systemPrompt
+                    )
+                    val assistantText = response.choices?.firstOrNull()?.message?.content?.toString() ?: "无法解析图片"
+
+                    val userMsg = Message("msg_${System.currentTimeMillis()}", sessionId, "user", text ?: "[图片]", System.currentTimeMillis())
+                    val aiMsg = Message("msg_${System.currentTimeMillis() + 1}", sessionId, "assistant", assistantText, System.currentTimeMillis())
+                    messages = messages + userMsg + aiMsg
+
+                    // 更新对话历史
+                    chatHistory = chatHistory + ChatMessage(role = "user", content = text ?: "[图片]") + ChatMessage(role = "assistant", content = assistantText)
+
+                    if (autoTts) ttsService.speak(assistantText, client)
                 } catch (e: Exception) {
                     Toast.makeText(context, "发送失败: ${e.message}", Toast.LENGTH_SHORT).show()
                 } finally { isLoading = false }
@@ -240,11 +245,24 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
                                 try {
                                     val client = mimoClient ?: run {
                                         Toast.makeText(context, "请先配置 API", Toast.LENGTH_SHORT).show()
+                                        isLoading = false
                                         return@launch
                                     }
-                                    val response = client.sendMessage(sessionId, text, character.systemPrompt)
-                                    messages = messages + Message("msg_${System.currentTimeMillis()}", sessionId, "user", text, System.currentTimeMillis()) + response
-                                    if (autoTts) ttsService.speak(response.content, client)
+                                    val response = client.sendMessage(
+                                        sessionId = sessionId,
+                                        history = chatHistory,
+                                        userText = text,
+                                        systemPrompt = character.systemPrompt
+                                    )
+                                    val assistantText = response.choices?.firstOrNull()?.message?.content?.toString() ?: "无回复"
+
+                                    val userMsg = Message("msg_${System.currentTimeMillis()}", sessionId, "user", text, System.currentTimeMillis())
+                                    val aiMsg = Message("msg_${System.currentTimeMillis() + 1}", sessionId, "assistant", assistantText, System.currentTimeMillis())
+                                    messages = messages + userMsg + aiMsg
+
+                                    chatHistory = chatHistory + ChatMessage(role = "user", content = text) + ChatMessage(role = "assistant", content = assistantText)
+
+                                    if (autoTts) ttsService.speak(assistantText, client)
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "发送失败: ${e.message}", Toast.LENGTH_SHORT).show()
                                 } finally { isLoading = false }
@@ -274,9 +292,7 @@ private fun MessageBubble(message: Message) {
             Box(
                 modifier = Modifier.size(32.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
                 contentAlignment = Alignment.Center
-            ) {
-                Text("🤖", fontSize = 16.sp)
-            }
+            ) { Text("🤖", fontSize = 16.sp) }
             Spacer(Modifier.width(8.dp))
         }
         Surface(
@@ -296,9 +312,7 @@ private fun MessageBubble(message: Message) {
             Box(
                 modifier = Modifier.size(32.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiary),
                 contentAlignment = Alignment.Center
-            ) {
-                Text("👤", fontSize = 16.sp)
-            }
+            ) { Text("👤", fontSize = 16.sp) }
         }
     }
 }
