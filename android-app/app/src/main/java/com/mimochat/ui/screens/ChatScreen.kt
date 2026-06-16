@@ -88,9 +88,13 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
                     val mimeType = context.contentResolver.getType(it) ?: "image/jpeg"
                     val text = inputText.ifBlank { null }
                     inputText = ""
-                    val response = mimoClient!!.sendImage(sessionId, base64, mimeType, text)
+                    val client = mimoClient ?: run {
+                        Toast.makeText(context, "请先配置 API", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    val response = client.sendImage(sessionId, base64, mimeType, text)
                     messages = messages + Message("msg_${System.currentTimeMillis()}", sessionId, "user", text ?: "[图片]", System.currentTimeMillis()) + response
-                    if (autoTts) ttsService.speak(response.content, mimoClient)
+                    if (autoTts) ttsService.speak(response.content, client)
                 } catch (e: Exception) {
                     Toast.makeText(context, "发送失败: ${e.message}", Toast.LENGTH_SHORT).show()
                 } finally { isLoading = false }
@@ -184,7 +188,11 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
                         result.onSuccess { file ->
                             Toast.makeText(context, "正在识别...", Toast.LENGTH_SHORT).show()
                             scope.launch {
-                                asrService.transcribe(file, mimoClient!!).onSuccess { text ->
+                                val client = mimoClient ?: run {
+                                    Toast.makeText(context, "请先配置 API", Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+                                asrService.transcribe(file, client).onSuccess { text ->
                                     inputText = text
                                     Toast.makeText(context, "识别完成", Toast.LENGTH_SHORT).show()
                                 }.onFailure { e ->
@@ -221,9 +229,13 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
                             scope.launch {
                                 isLoading = true
                                 try {
-                                    val response = mimoClient!!.sendMessage(sessionId, text, character.systemPrompt)
+                                    val client = mimoClient ?: run {
+                                        Toast.makeText(context, "请先配置 API", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    val response = client.sendMessage(sessionId, text, character.systemPrompt)
                                     messages = messages + Message("msg_${System.currentTimeMillis()}", sessionId, "user", text, System.currentTimeMillis()) + response
-                                    if (autoTts) ttsService.speak(response.content, mimoClient)
+                                    if (autoTts) ttsService.speak(response.content, client)
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "发送失败: ${e.message}", Toast.LENGTH_SHORT).show()
                                 } finally { isLoading = false }
