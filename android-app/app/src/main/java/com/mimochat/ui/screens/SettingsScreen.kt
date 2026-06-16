@@ -28,7 +28,7 @@ fun SettingsScreen(navController: NavController) {
         topBar = {
             TopAppBar(
                 title = { Text("MiMo API 设置") },
-                navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+                navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,
@@ -55,7 +55,7 @@ fun SettingsScreen(navController: NavController) {
                 visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(onClick = { showKey = !showKey }) {
-                        Icon(if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (showKey) "隐藏" else "显示")
+                        Icon(if (showKey) Icons.Default.Lock else Icons.Default.LockOpen, if (showKey) "隐藏" else "显示")
                     }
                 }
             )
