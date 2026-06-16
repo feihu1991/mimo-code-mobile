@@ -33,12 +33,21 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x android-app/gradlew
       
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android-app/app/release.keystore
+      
       - name: Build Debug APK
         working-directory: android-app
         run: ./gradlew assembleDebug
       
       - name: Build Release APK
         working-directory: android-app
+        env:
+          KEYSTORE_FILE: release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease
       
       - name: Get tag
@@ -52,7 +61,7 @@ jobs:
           name: "MiMo Chat ${{ steps.tag.outputs.version }}"
           files: |
             android-app/app/build/outputs/apk/debug/app-debug.apk
-            android-app/app/build/outputs/apk/release/app-release-unsigned.apk
+            android-app/app/build/outputs/apk/release/app-release.apk
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
