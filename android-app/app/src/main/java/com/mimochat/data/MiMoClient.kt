@@ -10,7 +10,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.io.File
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 data class MiMoConfig(
@@ -41,6 +43,15 @@ data class TranscriptionResponse(
 )
 
 class MiMoClient(private val config: MiMoConfig) {
+
+    private fun buildUrl(vararg pathSegments: String): String {
+        val base = config.baseUrl.trimEnd('/')
+        val urlBuilder = base.toHttpUrl().newBuilder()
+        pathSegments.forEach { segment ->
+            urlBuilder.addPathSegment(segment)
+        }
+        return urlBuilder.build().toString()
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -80,7 +91,7 @@ class MiMoClient(private val config: MiMoConfig) {
 
     suspend fun getMessages(sessionId: String): List<Message> = withContext(Dispatchers.IO) {
         val response = Request.Builder()
-            .url("${config.baseUrl}/session/${sessionId}/messages")
+            .url(buildUrl("session", sessionId, "messages"))
             .get()
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .build()
@@ -94,7 +105,7 @@ class MiMoClient(private val config: MiMoConfig) {
     suspend fun sendMessage(sessionId: String, content: String, system: String? = null): Message = withContext(Dispatchers.IO) {
         val requestBody = SendMessageRequest(parts = listOf(PartInput(type = "text", content = content)), system = system)
         Request.Builder()
-            .url("${config.baseUrl}/session/${sessionId}/prompt")
+            .url(buildUrl("session", sessionId, "prompt"))
             .post(gson.toJson(requestBody).toRequestBody("application/json".toMediaType()))
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .addHeader("Content-Type", "application/json")
@@ -107,7 +118,7 @@ class MiMoClient(private val config: MiMoConfig) {
         if (text != null) parts.add(PartInput(type = "text", content = text))
         parts.add(PartInput(type = "file", content = imageBase64, mimeType = mimeType))
         Request.Builder()
-            .url("${config.baseUrl}/session/${sessionId}/prompt")
+            .url(buildUrl("session", sessionId, "prompt"))
             .post(gson.toJson(SendMessageRequest(parts = parts)).toRequestBody("application/json".toMediaType()))
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .addHeader("Content-Type", "application/json")
