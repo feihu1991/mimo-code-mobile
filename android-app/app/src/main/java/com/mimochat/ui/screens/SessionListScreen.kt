@@ -53,7 +53,7 @@ fun SessionListScreen(navController: NavController) {
                         createdAt = System.currentTimeMillis(),
                         updatedAt = System.currentTimeMillis()
                     )
-                    SessionManager.saveSession(context, newSession)
+                    SessionManager.addSession(context, newSession)
                     navController.navigate(Routes.chat(newSession.id, newSession.title))
                 },
                 containerColor = MaterialTheme.colorScheme.primary
