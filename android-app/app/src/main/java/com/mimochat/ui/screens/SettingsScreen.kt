@@ -12,6 +12,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.mimochat.BuildConfig
 import com.mimochat.data.MiMoConfig
 import com.mimochat.data.MiMoConfigManager
 
@@ -20,7 +21,7 @@ import com.mimochat.data.MiMoConfigManager
 fun SettingsScreen(navController: NavController) {
     val context = LocalContext.current
     val existingConfig = remember { MiMoConfigManager.getConfig(context) }
-    var baseUrl by remember { mutableStateOf(existingConfig?.baseUrl ?: "https://api.mimo.xiaomi.com") }
+    var baseUrl by remember { mutableStateOf(existingConfig?.baseUrl ?: BuildConfig.DEFAULT_API_URL) }
     var apiKey by remember { mutableStateOf(existingConfig?.apiKey ?: "") }
     var showKey by remember { mutableStateOf(false) }
 
@@ -81,7 +82,7 @@ fun SettingsScreen(navController: NavController) {
             OutlinedButton(
                 onClick = {
                     MiMoConfigManager.clearConfig(context)
-                    baseUrl = "https://api.mimo.xiaomi.com"; apiKey = ""
+                    baseUrl = BuildConfig.DEFAULT_API_URL; apiKey = ""
                     Toast.makeText(context, "配置已清除", Toast.LENGTH_SHORT).show()
                 },
                 modifier = Modifier.fillMaxWidth()
