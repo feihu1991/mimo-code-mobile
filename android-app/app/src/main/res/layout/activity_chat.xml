@@ -1,85 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical">
-
-    <com.google.android.material.appbar.MaterialToolbar
-        android:id="@+id/toolbar"
-        android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize"
-        android:background="@color/primary"
-        app:titleTextColor="@android:color/white"
-        app:navigationIcon="@drawable/ic_back"
-        app:navigationIconTint="@android:color/white"
-        xmlns:app="http://schemas.android.com/apk/res-auto" />
-
-    <FrameLayout
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1">
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/messageRecyclerView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:clipToPadding="false"
-            android:padding="8dp" />
-
-        <ProgressBar
-            android:id="@+id/progressBar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:visibility="gone" />
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
+    <com.google.android.material.appbar.MaterialToolbar android:id="@+id/toolbar" android:layout_width="match_parent" android:layout_height="?attr/actionBarSize" android:background="@color/primary" app:titleTextColor="@android:color/white" app:navigationIcon="@drawable/ic_back" app:navigationIconTint="@android:color/white" />
+    <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+        <androidx.recyclerview.widget.RecyclerView android:id="@+id/messageRecyclerView" android:layout_width="match_parent" android:layout_height="match_parent" android:clipToPadding="false" android:padding="8dp" />
+        <ProgressBar android:id="@+id/progressBar" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center" android:visibility="gone" />
+        <LinearLayout android:id="@+id/recordingIndicator" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center" android:orientation="horizontal" android:gravity="center" android:padding="12dp" android:background="@drawable/bg_input" android:visibility="gone">
+            <View android:layout_width="12dp" android:layout_height="12dp" android:background="@android:color/holo_red_dark" android:alpha="0.8" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="正在录音..." android:textColor="@android:color/holo_red_dark" android:textStyle="bold" android:layout_marginStart="8dp" />
+        </LinearLayout>
     </FrameLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="8dp"
-        android:background="@color/surface"
-        android:gravity="center_vertical">
-
-        <ImageButton
-            android:id="@+id/attachButton"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:src="@drawable/ic_attach"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Attach" />
-
-        <ImageButton
-            android:id="@+id/voiceButton"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:src="@drawable/ic_mic"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Voice" />
-
-        <EditText
-            android:id="@+id/messageInput"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:layout_marginEnd="8dp"
-            android:hint="输入消息..."
-            android:inputType="textMultiLine"
-            android:maxLines="5"
-            android:minHeight="48dp"
-            android:padding="12dp"
-            android:background="@drawable/bg_input"
-            android:textSize="16sp" />
-
-        <ImageButton
-            android:id="@+id/sendButton"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:src="@drawable/ic_send"
-            android:background="@drawable/bg_send_button"
-            android:contentDescription="Send" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:padding="8dp" android:background="@color/surface" android:gravity="center_vertical">
+        <ImageButton android:id="@+id/attachButton" android:layout_width="40dp" android:layout_height="40dp" android:src="@drawable/ic_attach" android:background="?attr/selectableItemBackgroundBorderless" android:contentDescription="添加图片" android:scaleType="centerInside" />
+        <ImageButton android:id="@+id/voiceButton" android:layout_width="40dp" android:layout_height="40dp" android:layout_marginStart="4dp" android:src="@drawable/ic_mic" android:background="?attr/selectableItemBackgroundBorderless" android:contentDescription="语音输入" android:scaleType="centerInside" />
+        <ImageButton android:id="@+id/ttsButton" android:layout_width="40dp" android:layout_height="40dp" android:layout_marginStart="4dp" android:src="@drawable/ic_speaker" android:background="?attr/selectableItemBackgroundBorderless" android:contentDescription="语音朗读" android:scaleType="centerInside" android:alpha="0.4" />
+        <com.google.android.material.textfield.TextInputEditText android:id="@+id/messageInput" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginHorizontal="8dp" android:hint="输入消息..." android:inputType="textMultiLine" android:maxLines="4" android:background="@drawable/bg_input" android:padding="12dp" android:textSize="15sp" />
+        <com.google.android.material.floatingactionbutton.FloatingActionButton android:id="@+id/sendButton" android:layout_width="48dp" android:layout_height="48dp" android:src="@drawable/ic_send" app:fabSize="mini" app:backgroundTint="@color/primary" />
     </LinearLayout>
 </LinearLayout>
