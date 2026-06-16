@@ -158,15 +158,13 @@ class VoiceCallService(private val context: Context) {
     fun isMuted(): Boolean = isMuted
 
     fun setSpeaker(enabled: Boolean) {
+        if (isSpeakerOn == enabled) return
         isSpeakerOn = enabled
-        audioTrack?.let { track ->
-            val streamType = if (enabled) {
-                android.media.AudioManager.STREAM_MUSIC
-            } else {
-                android.media.AudioManager.STREAM_VOICE_CALL
-            }
-            // Note: AudioTrack stream type cannot be changed after creation
-            // This is handled in startAudioPlayback
+        // AudioTrack stream type cannot be changed after creation,
+        // so we must recreate it to switch between speaker and earpiece
+        if (isPlaying) {
+            stopAudioPlayback()
+            startAudioPlayback()
         }
     }
 
