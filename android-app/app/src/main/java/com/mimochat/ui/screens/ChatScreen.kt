@@ -79,8 +79,17 @@ fun ChatScreen(navController: NavController, sessionId: String, sessionTitle: St
             scope.launch {
                 isLoading = true
                 try {
-                    val bytes = context.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } ?: return@launch
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    // Decode bounds first to calculate sample size (prevents OOM on large images)
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    context.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s, null, opts) }
+                    val maxDim = maxOf(opts.outWidth, opts.outHeight)
+                    var sampleSize = 1
+                    while (maxDim / sampleSize > 2048) sampleSize *= 2
+
+                    val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+                    val bitmap = context.contentResolver.openInputStream(it)?.use { s ->
+                        BitmapFactory.decodeStream(s, null, decodeOpts)
+                    } ?: return@launch
                     val ratio = 1024f / maxOf(bitmap.width, bitmap.height)
                     val scaled = if (ratio < 1) android.graphics.Bitmap.createScaledBitmap(bitmap, (bitmap.width * ratio).toInt(), (bitmap.height * ratio).toInt(), true) else bitmap
                     val out = ByteArrayOutputStream(); scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
