@@ -43,6 +43,23 @@ class MiMoClient(private val config: MiMoConfig) {
     
     private val gson = Gson()
     
+    private fun Request.executeAndParse(): okhttp3.Response {
+        val response = client.newCall(this).execute()
+        if (!response.isSuccessful) {
+            response.close()
+            throw Exception("API error: ${response.code}")
+        }
+        return response
+    }
+    
+    private inline fun <reified T> Request.executeAndParseJson(): T {
+        val response = executeAndParse()
+        return response.use { resp ->
+            val body = resp.body?.string() ?: throw Exception("Empty response")
+            gson.fromJson(body, T::class.java)
+        }
+    }
+    
     suspend fun createSession(title: String? = null): CreateSessionResponse = withContext(Dispatchers.IO) {
         val body = if (title != null) {
             gson.toJson(mapOf("title" to title))
@@ -50,20 +67,13 @@ class MiMoClient(private val config: MiMoConfig) {
             "{}"
         }
         
-        val request = Request.Builder()
+        Request.Builder()
             .url("${config.baseUrl}/session")
             .post(body.toRequestBody("application/json".toMediaType()))
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .addHeader("Content-Type", "application/json")
             .build()
-        
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw Exception("API error: ${response.code}")
-        }
-        
-        val responseBody = response.body?.string() ?: throw Exception("Empty response")
-        gson.fromJson(responseBody, CreateSessionResponse::class.java)
+            .executeAndParseJson()
     }
     
     suspend fun getMessages(sessionId: String): List<Message> = withContext(Dispatchers.IO) {
@@ -73,14 +83,12 @@ class MiMoClient(private val config: MiMoConfig) {
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .build()
         
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw Exception("API error: ${response.code}")
+        val response = request.executeAndParse()
+        response.use { resp ->
+            val body = resp.body?.string() ?: throw Exception("Empty response")
+            val type = object : TypeToken<List<Message>>() {}.type
+            gson.fromJson(body, type)
         }
-        
-        val responseBody = response.body?.string() ?: throw Exception("Empty response")
-        val type = object : TypeToken<List<Message>>() {}.type
-        gson.fromJson(responseBody, type)
     }
     
     suspend fun sendMessage(
@@ -91,20 +99,13 @@ class MiMoClient(private val config: MiMoConfig) {
         val parts = listOf(PartInput(type = "text", content = content))
         val requestBody = SendMessageRequest(parts = parts, system = system)
         
-        val request = Request.Builder()
+        Request.Builder()
             .url("${config.baseUrl}/session/${sessionId}/prompt")
             .post(gson.toJson(requestBody).toRequestBody("application/json".toMediaType()))
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .addHeader("Content-Type", "application/json")
             .build()
-        
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw Exception("API error: ${response.code}")
-        }
-        
-        val responseBody = response.body?.string() ?: throw Exception("Empty response")
-        gson.fromJson(responseBody, Message::class.java)
+            .executeAndParseJson()
     }
     
     suspend fun sendImage(
@@ -121,19 +122,12 @@ class MiMoClient(private val config: MiMoConfig) {
         
         val requestBody = SendMessageRequest(parts = parts)
         
-        val request = Request.Builder()
+        Request.Builder()
             .url("${config.baseUrl}/session/${sessionId}/prompt")
             .post(gson.toJson(requestBody).toRequestBody("application/json".toMediaType()))
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .addHeader("Content-Type", "application/json")
             .build()
-        
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw Exception("API error: ${response.code}")
-        }
-        
-        val responseBody = response.body?.string() ?: throw Exception("Empty response")
-        gson.fromJson(responseBody, Message::class.java)
+            .executeAndParseJson()
     }
 }
