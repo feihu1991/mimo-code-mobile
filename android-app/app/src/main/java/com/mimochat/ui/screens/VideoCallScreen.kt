@@ -95,18 +95,31 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
         )
 
         // Local preview (CameraX)
-        AndroidView(
-            factory = { ctx ->
-                PreviewView(ctx).also { previewView ->
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                    cameraProviderFuture.addListener({
-                        val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                        val selector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-                        try { cameraProvider.unbindAll(); cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview) } catch (_: Exception) {}
-                    }, ContextCompat.getMainExecutor(ctx))
+        val previewView = remember { PreviewView(context) }
+        var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+
+        // Initialize camera provider once
+        LaunchedEffect(Unit) {
+            val future = ProcessCameraProvider.getInstance(context)
+            cameraProvider = future.get()
+        }
+
+        // Re-bind camera when isFrontCamera changes
+        LaunchedEffect(isFrontCamera, cameraProvider) {
+            cameraProvider?.let { provider ->
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
                 }
-            },
+                val selector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                try {
+                    provider.unbindAll()
+                    provider.bindToLifecycle(lifecycleOwner, selector, preview)
+                } catch (_: Exception) {}
+            }
+        }
+
+        AndroidView(
+            factory = { previewView },
             modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).size(width = 120.dp, height = 160.dp)
         )
 
