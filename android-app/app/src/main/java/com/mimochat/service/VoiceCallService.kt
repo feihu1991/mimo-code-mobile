@@ -31,6 +31,7 @@ sealed class VoiceCallState {
     object Disconnected : VoiceCallState()
     object Connecting : VoiceCallState()
     object Connected : VoiceCallState()
+    object Reconnecting : VoiceCallState()
     data class Error(val message: String) : VoiceCallState()
 }
 
@@ -48,6 +49,8 @@ class VoiceCallService(private val context: Context) {
         private const val CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val AUDIO_SEND_INTERVAL_MS = 100L
+        private const val MAX_RECONNECT_ATTEMPTS = 5
+        private const val BASE_RECONNECT_DELAY_MS = 1000L
     }
 
     private val gson = Gson()
@@ -66,10 +69,13 @@ class VoiceCallService(private val context: Context) {
     private var isSpeakerOn = true
 
     private var recordingJob: Job? = null
+    private var reconnectJob: Job? = null
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var callback: VoiceCallCallback? = null
     private var config: VoiceCallConfig? = null
+    private var intentionalDisconnect = false
+    private var reconnectAttempts = 0
 
     var state: VoiceCallState = VoiceCallState.Disconnected
         private set
@@ -87,8 +93,12 @@ class VoiceCallService(private val context: Context) {
 
     fun startCall(config: VoiceCallConfig) {
         this.config = config
-        updateState(VoiceCallState.Connecting)
+        this.intentionalDisconnect = false
+        this.reconnectAttempts = 0
+        connectWebSocket(config)
+    }
 
+    private fun connectWebSocket(config: VoiceCallConfig) {
         val wsUrl = config.baseUrl.replace("https://", "wss://")
             .replace("http://", "ws://") + "/voice"
 
@@ -100,6 +110,7 @@ class VoiceCallService(private val context: Context) {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "WebSocket connected")
+                reconnectAttempts = 0
                 updateState(VoiceCallState.Connected)
 
                 val sessionMsg = gson.toJson(mapOf(
@@ -126,18 +137,49 @@ class VoiceCallService(private val context: Context) {
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "WebSocket closing: $code $reason")
                 webSocket.close(1000, null)
-                stopCall()
+                handleDisconnection()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket failure", t)
-                updateState(VoiceCallState.Error(t.message ?: "Connection failed"))
-                stopCall()
+                handleDisconnection(t.message)
             }
         })
     }
 
+    private fun handleDisconnection(errorMsg: String? = null) {
+        stopAudioCapture()
+        stopAudioPlayback()
+        webSocket = null
+
+        if (intentionalDisconnect) {
+            config = null
+            updateState(VoiceCallState.Disconnected)
+            return
+        }
+
+        val cfg = config
+        if (cfg != null && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts++
+            val delayMs = BASE_RECONNECT_DELAY_MS * (1L shl (reconnectAttempts - 1)).coerceAtMost(16)
+            Log.d(TAG, "Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)")
+            updateState(VoiceCallState.Reconnecting)
+            reconnectJob = scope.launch {
+                delay(delayMs)
+                if (!intentionalDisconnect && config != null) {
+                    connectWebSocket(cfg)
+                }
+            }
+        } else {
+            config = null
+            updateState(VoiceCallState.Error(errorMsg ?: "Connection lost"))
+        }
+    }
+
     fun stopCall() {
+        intentionalDisconnect = true
+        reconnectJob?.cancel()
+        reconnectJob = null
         recordingJob?.cancel()
         recordingJob = null
 

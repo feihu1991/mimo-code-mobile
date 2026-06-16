@@ -86,6 +86,7 @@ fun VideoCallScreen(navController: NavController, sessionId: String) {
             when (callState) {
                 is VoiceCallState.Connecting -> "正在连接..."
                 is VoiceCallState.Connected -> "视频通话中"
+                is VoiceCallState.Reconnecting -> "重新连接中..."
                 is VoiceCallState.Disconnected -> "已断开"
                 is VoiceCallState.Error -> "连接失败"
             },

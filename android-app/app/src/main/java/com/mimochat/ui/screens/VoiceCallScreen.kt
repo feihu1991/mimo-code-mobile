@@ -79,6 +79,7 @@ fun VoiceCallScreen(navController: NavController, sessionId: String) {
                 is VoiceCallState.Disconnected -> "已断开"
                 is VoiceCallState.Connecting -> "正在连接..."
                 is VoiceCallState.Connected -> "通话中"
+                is VoiceCallState.Reconnecting -> "重新连接中..."
                 is VoiceCallState.Error -> "连接失败"
             },
             style = MaterialTheme.typography.bodyLarge,
