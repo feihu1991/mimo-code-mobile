@@ -9,6 +9,8 @@
 -keep class com.mimochat.service.VoiceCallConfig { *; }
 -keep class com.mimochat.service.VoiceCallState { *; }
 -keep class com.mimochat.service.VoiceCallState$* { *; }
+-keep interface com.mimochat.service.VoiceCallCallback { *; }
+-keep interface com.mimochat.service.VideoCallCallback { *; }
 -keepclassmembers,allowobfuscation class * {
     @com.google.gson.annotations.SerializedName <fields>;
 }
