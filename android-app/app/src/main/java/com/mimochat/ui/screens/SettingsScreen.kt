@@ -3,7 +3,7 @@ package com.mimochat.ui.screens
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -55,7 +55,7 @@ fun SettingsScreen(navController: NavController) {
                 visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(onClick = { showKey = !showKey }) {
-                        Icon(if (showKey) Icons.Default.Lock else Icons.Default.LockOpen, if (showKey) "隐藏" else "显示")
+                        Icon(Icons.Default.RemoveRedEye, if (showKey) "隐藏" else "显示")
                     }
                 }
             )
