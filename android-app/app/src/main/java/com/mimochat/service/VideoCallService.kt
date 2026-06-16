@@ -1,4 +1,5 @@
-package com.mimochat
+package com.mimochat.service
+import com.mimochat.data.*
 
 import android.Manifest
 import android.content.Context

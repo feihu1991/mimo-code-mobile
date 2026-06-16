@@ -3,22 +3,11 @@
 -keep class okhttp3.** { *; }
 -keepattributes Signature,*Annotation*
 -keep class com.google.gson.** { *; }
--keep class com.mimochat.MiMoConfig { *; }
--keep class com.mimochat.Message { *; }
--keep class com.mimochat.Session { *; }
--keep class com.mimochat.Part { *; }
--keep class com.mimochat.PartInput { *; }
--keep class com.mimochat.CreateSessionResponse { *; }
--keep class com.mimochat.SendMessageRequest { *; }
--keep class com.mimochat.TranscriptionResponse { *; }
--keep class com.mimochat.VoiceCallConfig { *; }
--keep class com.mimochat.VoiceCallState { *; }
--keep class com.mimochat.VoiceCallState$* { *; }
--keep class com.mimochat.Character { *; }
+-keep class com.mimochat.data.** { *; }
+-keep class com.mimochat.service.VoiceCallConfig { *; }
+-keep class com.mimochat.service.VoiceCallState { *; }
+-keep class com.mimochat.service.VoiceCallState$* { *; }
 -keepclassmembers,allowobfuscation class * { @com.google.gson.annotations.SerializedName <fields>; }
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
--keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
 -keep class androidx.camera.** { *; }
--keep class androidx.media3.** { *; }
--dontwarn androidx.media3.**
 -keep class androidx.security.crypto.** { *; }

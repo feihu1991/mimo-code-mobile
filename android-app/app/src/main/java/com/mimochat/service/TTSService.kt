@@ -1,4 +1,5 @@
-package com.mimochat
+package com.mimochat.service
+import com.mimochat.data.*
 
 import android.content.Context
 import android.media.AudioAttributes

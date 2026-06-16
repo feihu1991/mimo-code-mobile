@@ -1,4 +1,4 @@
-package com.mimochat
+package com.mimochat.data
 
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken

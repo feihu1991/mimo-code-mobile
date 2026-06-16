@@ -1,4 +1,4 @@
-package com.mimochat
+package com.mimochat.data
 
 data class Session(
     val id: String,

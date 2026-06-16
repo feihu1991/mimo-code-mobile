@@ -1,4 +1,4 @@
-package com.mimochat
+package com.mimochat.data
 
 import android.content.Context
 import android.content.SharedPreferences
