@@ -15,7 +15,7 @@ android {
         versionCode 1750100002
         versionName "2.0.2"
 
-        buildConfigField "String", "DEFAULT_API_URL", '"https://api.mimo.xiaomi.com"'
+        buildConfigField "String", "DEFAULT_API_URL", '"https://api.xiaomimimo.com/v1"'
     }
 
     signingConfigs {
