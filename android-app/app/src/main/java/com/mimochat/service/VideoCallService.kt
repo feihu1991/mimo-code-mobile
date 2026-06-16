@@ -23,6 +23,8 @@ class VideoCallService(private val context: Context) {
     companion object {
         private const val TAG = "VideoCallService"
         private const val SAMPLE_RATE = 16000
+        private const val MAX_RECONNECT_ATTEMPTS = 5
+        private const val BASE_RECONNECT_DELAY_MS = 1000L
     }
 
     private val gson = Gson()
@@ -31,8 +33,9 @@ class VideoCallService(private val context: Context) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var isRecording = false; private var isPlaying = false; private var isMuted = false; private var isSpeakerOn = true
-    private var recordingJob: Job? = null; private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var recordingJob: Job? = null; private var reconnectJob: Job? = null; private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var callback: VideoCallCallback? = null; private var config: VoiceCallConfig? = null
+    private var intentionalDisconnect = false; private var reconnectAttempts = 0
     var state: VoiceCallState = VoiceCallState.Disconnected; private set
     var onVideoFrame: ((ByteArray) -> Unit)? = null
 
@@ -41,27 +44,48 @@ class VideoCallService(private val context: Context) {
     fun hasPermission(): Boolean = ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     fun startCall(config: VoiceCallConfig) {
-        this.config = config; updateState(VoiceCallState.Connecting)
+        this.config = config; this.intentionalDisconnect = false; this.reconnectAttempts = 0
+        connectWebSocket(config)
+    }
+
+    private fun connectWebSocket(config: VoiceCallConfig) {
+        updateState(VoiceCallState.Connecting)
         val wsUrl = config.baseUrl.replace("https://", "wss://").replace("http://", "ws://") + "/video"
         val request = Request.Builder().url(wsUrl).addHeader("Authorization", "Bearer ${config.apiKey}").build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                updateState(VoiceCallState.Connected)
+                reconnectAttempts = 0; updateState(VoiceCallState.Connected)
                 webSocket.send(gson.toJson(mapOf("type" to "session.create", "session_id" to config.sessionId, "character_id" to config.character.id, "system_prompt" to config.character.systemPrompt, "mode" to "video")))
                 startAudioCapture(); startAudioPlayback()
             }
             override fun onMessage(webSocket: WebSocket, text: String) { handleTextMessage(text) }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) { if (isPlaying) audioTrack?.write(bytes.toByteArray(), 0, bytes.size) }
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null); stopCall() }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { updateState(VoiceCallState.Error(t.message ?: "Connection failed")); stopCall() }
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null); handleDisconnection() }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { handleDisconnection(t.message) }
         })
+    }
+
+    private fun handleDisconnection(errorMsg: String? = null) {
+        stopAudioCapture(); stopAudioPlayback(); webSocket = null
+        if (intentionalDisconnect) { config = null; updateState(VoiceCallState.Disconnected); return }
+        val cfg = config
+        if (cfg != null && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts++
+            val delayMs = BASE_RECONNECT_DELAY_MS * (1L shl (reconnectAttempts - 1)).coerceAtMost(16)
+            Log.d(TAG, "Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)")
+            updateState(VoiceCallState.Reconnecting)
+            reconnectJob = scope.launch {
+                delay(delayMs)
+                if (!intentionalDisconnect && config != null) connectWebSocket(cfg)
+            }
+        } else { config = null; updateState(VoiceCallState.Error(errorMsg ?: "Connection lost")) }
     }
 
     fun sendVideoFrame(jpegData: ByteArray) {
         webSocket?.send(gson.toJson(mapOf("type" to "video.frame", "data" to Base64.encodeToString(jpegData, Base64.NO_WRAP), "format" to "jpeg")))
     }
 
-    fun stopCall() { recordingJob?.cancel(); stopAudioCapture(); stopAudioPlayback(); webSocket?.close(1000, "Call ended"); webSocket = null; config = null; updateState(VoiceCallState.Disconnected) }
+    fun stopCall() { intentionalDisconnect = true; reconnectJob?.cancel(); recordingJob?.cancel(); stopAudioCapture(); stopAudioPlayback(); webSocket?.close(1000, "Call ended"); webSocket = null; config = null; updateState(VoiceCallState.Disconnected) }
     fun setMuted(muted: Boolean) { isMuted = muted }
     fun isMuted(): Boolean = isMuted
 
